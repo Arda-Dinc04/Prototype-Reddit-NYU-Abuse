@@ -16,10 +16,12 @@ nyu-reddit-abuse-proto/
 ├── .env.example          # Configuration template
 ├── README.md            # This file
 ├── requirements.txt     # Python dependencies
+├── nyu_reddit_local.sqlite # Local database (included!)
 ├── src/
 │   ├── config.py        # Environment configuration
 │   ├── aws_utils.py     # AWS S3/DynamoDB utilities
-│   └── ingest_s3.py     # Main data collection script
+│   ├── ingest_s3.py     # Main data collection script
+│   └── export_to_local_db.py # Export AWS data to SQLite
 ├── dashboard/
 │   └── app.py          # Streamlit dashboard (legacy)
 ├── browse_data.py      # Quick data overview
@@ -75,14 +77,14 @@ python browse_data.py
 python view_db.py
 ```
 
-### 5. Local Database (For Collaborators)
+### 5. Local Database
 
 ```bash
-# Export AWS data to local SQLite (requires AWS access)
-python src/export_to_local_db.py
+# The database is included in the repository!
+# nyu_reddit_local.sqlite contains all collected data
 
-# This creates nyu_reddit_local.sqlite with all collected data
-# Collaborators can work with this database without AWS credentials
+# Optional: Export fresh data from AWS (requires AWS access)
+python src/export_to_local_db.py
 ```
 
 ## 📊 Current Dataset
