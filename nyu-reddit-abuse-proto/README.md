@@ -95,6 +95,44 @@ python src/export_to_local_db.py
 - **Time Range**: 8 days (Oct 2-9, 2025)
 - **Storage**: 546 JSON files in S3
 
+## 🎥 Dashboard Demo
+
+Watch the toxicity analysis dashboard in action:
+
+https://github.com/ardadinc/Prototype-Reddit-NYU-Abuse/blob/main/Screen%20Recording%202025-10-09%20at%202.48.58%20PM.mp4
+
+_Screen recording showing the Streamlit dashboard with toxicity classification results, flagged content review, and filtering capabilities._
+
+### 📹 Creating a Screen Recording
+
+To create your own dashboard demo:
+
+1. **Start the dashboard:**
+
+   ```bash
+   source .venv/bin/activate
+   streamlit run dashboard/toxicity_dashboard.py
+   ```
+
+2. **Record the screen** (macOS):
+
+   - Press `Cmd + Shift + 5` to open Screen Recording
+   - Select the browser window with the dashboard
+   - Click "Record" and demonstrate the features
+   - Press `Cmd + Shift + 5` again to stop
+
+3. **Convert to MP4** (if needed):
+
+   ```bash
+   # If you recorded as MOV, convert to MP4
+   ffmpeg -i dashboard-demo.mov -c:v libx264 -c:a aac dashboard-demo.mp4
+   ```
+
+4. **Upload to GitHub:**
+   - Drag the MP4 file to a GitHub issue or PR
+   - GitHub will automatically create an assets URL
+   - Copy the URL and update the README
+
 ## 🔧 Core Components
 
 ### `src/ingest_s3.py`
