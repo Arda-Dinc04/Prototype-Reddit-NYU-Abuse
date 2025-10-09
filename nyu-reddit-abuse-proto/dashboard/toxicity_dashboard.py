@@ -63,11 +63,11 @@ def load_data():
     return df
 
 def get_toxicity_thresholds():
-    """Get toxicity thresholds for flagging"""
+    """Get toxicity thresholds for flagging - optimized for identity attack recall"""
     return {
         "toxic": {"high": 0.70, "medium": 0.50},
-        "insult": {"high": 0.78, "medium": 0.55},          # tiny nudge
-        "identity_attack": {"high": 0.58, "medium": 0.38}, # lower to catch more
+        "insult": {"high": 0.78, "medium": 0.55},          # keep ~0.78
+        "identity_attack": {"high": 0.58, "medium": 0.38}, # lowered for better recall
         "threat": {"high": 0.68, "medium": 0.55},
         "sexual_explicit": {"high": 0.75, "medium": 0.55},
         "severe_toxic": {"high": 0.80, "medium": 0.60},

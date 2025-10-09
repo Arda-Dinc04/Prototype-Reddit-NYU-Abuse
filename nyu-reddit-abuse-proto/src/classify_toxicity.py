@@ -32,10 +32,11 @@ def light_deobfuscate(s: str) -> str:
     return s.translate(table)
 
 def get_parent_text(conn, full_raw_obj: dict):
-    """Get parent text for context - fixed to look in correct location"""
-    # parent_id likely at top-level, not under raw_data
-    parent_id = full_raw_obj.get('parent_id') or full_raw_obj.get('raw_data', {}).get('parent_id')
-    link_id   = full_raw_obj.get('link_id')   or full_raw_obj.get('raw_data', {}).get('link_id')
+    """Get parent text for context - CRITICAL: parent_id is at top-level JSON"""
+    # parent_id is at top-level, not under raw_data
+    parent_id = full_raw_obj.get('parent_id')  # e.g., 't1_xxx' or 't3_xxx'
+    link_id = full_raw_obj.get('link_id')      # e.g., 't3_xxx' for thread root
+    
     if not parent_id and not link_id:
         return ""
 
@@ -126,38 +127,78 @@ def clean_text(text: str) -> Tuple[str, Dict[str, bool]]:
     return cleaned, flags
 
 def get_toxicity_thresholds():
-    """Get toxicity classification thresholds"""
+    """Get toxicity classification thresholds - optimized for identity attack recall"""
     return {
         "toxic": {"high": 0.70, "medium": 0.50},
-        "insult": {"high": 0.78, "medium": 0.55},          # tiny nudge
-        "identity_attack": {"high": 0.58, "medium": 0.38}, # lower to catch more
+        "insult": {"high": 0.78, "medium": 0.55},          # keep ~0.78
+        "identity_attack": {"high": 0.58, "medium": 0.38}, # lowered for better recall
         "threat": {"high": 0.68, "medium": 0.55},
         "sexual_explicit": {"high": 0.75, "medium": 0.55},
         "severe_toxic": {"high": 0.80, "medium": 0.60},
         "severe_toxicity": {"high": 0.80, "medium": 0.60}  # Alternative name
     }
 
-def classify_toxicity(text: str, tokenizer, model) -> Dict[str, float]:
+def classify_toxicity_batch(texts: List[str], tokenizer, model) -> List[Dict[str, float]]:
     """
-    Classify text for toxicity using the model
+    Classify multiple texts for toxicity using batch processing
     
     Returns:
-        Dictionary with toxicity scores for each label
+        List of dictionaries with toxicity scores for each label
     """
-    if not text or len(text.strip()) == 0:
-        return {model.config.id2label[i]: 0.0 for i in range(model.config.num_labels)}
+    if not texts:
+        return []
     
-    # Tokenize and get predictions - prioritize child comment, truncate parent if needed
-    inputs = tokenizer(text, truncation=True, padding=False, max_length=512, return_tensors="pt")
+    # Filter out empty texts and create mapping
+    valid_texts = []
+    text_mapping = []
+    
+    for i, text in enumerate(texts):
+        if text and len(text.strip()) > 0:
+            valid_texts.append(text)
+            text_mapping.append(i)
+        else:
+            text_mapping.append(-1)  # Mark as empty
+    
+    if not valid_texts:
+        # All texts were empty
+        return [{model.config.id2label[i]: 0.0 for i in range(model.config.num_labels)} for _ in texts]
+    
+    # Batch tokenization with padding for stability
+    inputs = tokenizer(valid_texts, truncation=True, padding=True, max_length=512, return_tensors="pt")
     
     with torch.no_grad():
         outputs = model(**inputs)
         logits = outputs.logits
-        probabilities = torch.sigmoid(logits).cpu().numpy()[0]
+        probabilities = torch.sigmoid(logits).cpu().numpy()
     
     # Map to label names using proper indexing
     labels = [model.config.id2label[i] for i in range(model.config.num_labels)]
-    return {labels[i]: float(probabilities[i]) for i in range(len(labels))}
+    
+    # Create results for all texts
+    results = []
+    valid_idx = 0
+    
+    for i in range(len(texts)):
+        if text_mapping[i] == -1:
+            # Empty text
+            results.append({labels[j]: 0.0 for j in range(len(labels))})
+        else:
+            # Valid text
+            scores = {labels[j]: float(probabilities[valid_idx][j]) for j in range(len(labels))}
+            results.append(scores)
+            valid_idx += 1
+    
+    return results
+
+def classify_toxicity(text: str, tokenizer, model) -> Dict[str, float]:
+    """
+    Classify single text for toxicity using the model
+    
+    Returns:
+        Dictionary with toxicity scores for each label
+    """
+    results = classify_toxicity_batch([text], tokenizer, model)
+    return results[0] if results else {model.config.id2label[i]: 0.0 for i in range(model.config.num_labels)}
 
 def update_db_schema(db_path: str):
     """Add classification results table to database"""
@@ -222,11 +263,12 @@ def process_all_items(db_path: str, batch_size: int = 32):
     comments = cursor.fetchall()
     
     print(f"📊 Processing {len(posts)} posts and {len(comments)} comments...")
-    
+
     processed_count = 0
     flagged_count = 0
     thresholds = get_toxicity_thresholds()
-    
+    BATCH_SIZE = 64
+
     # Process posts
     for post_id, raw_json in posts:
         try:
@@ -293,7 +335,11 @@ def process_all_items(db_path: str, batch_size: int = 32):
         if processed_count % 50 == 0:
             print(f"   Processed {processed_count} items...")
     
-    # Process comments
+    # Process comments in batches for better performance
+    print("📝 Processing comments in batches...")
+    comment_batch = []
+    comment_data = []
+    
     for comment_id, raw_json in comments:
         try:
             raw_data = json.loads(raw_json)
@@ -301,7 +347,7 @@ def process_all_items(db_path: str, batch_size: int = 32):
             
             # Get parent context for better classification - pass full raw_data
             parent_text = get_parent_text(conn, raw_data)
-            # Prioritize child comment, truncate parent if needed
+            # CRITICAL: Child first, then parent - truncation drops parent first
             text = ((body or "") + "\n\nPARENT: " + (parent_text or "")).strip()
         except:
             text = ""
@@ -318,8 +364,69 @@ def process_all_items(db_path: str, batch_size: int = 32):
         else:
             # Apply light de-obfuscation before classification
             deobfuscated_text = light_deobfuscate(cleaned_text)
-            # Classify toxicity
-            scores = classify_toxicity(deobfuscated_text, tokenizer, model)
+            comment_batch.append(deobfuscated_text)
+            comment_data.append((comment_id, cleaned_text, flags))
+        
+        processed_count += 1
+        
+        # Process batch when it reaches BATCH_SIZE
+        if len(comment_batch) >= BATCH_SIZE:
+            # Classify batch
+            batch_scores = classify_toxicity_batch(comment_batch, tokenizer, model)
+            
+            # Store results
+            for i, (comment_id, cleaned_text, flags) in enumerate(comment_data):
+                scores = batch_scores[i]
+                
+                # Check if flagged
+                is_flagged = any(
+                    scores.get(label, 0) >= thresholds.get(label, {}).get("high", 0.7)
+                    for label in ["toxic", "insult", "identity_attack", "threat", "sexual_explicit", "severe_toxic", "severe_toxicity"]
+                )
+                
+                # Log borderline identity attacks for review
+                identity_score = scores.get("identity_attack", 0)
+                if 0.30 <= identity_score < thresholds["identity_attack"]["high"]:
+                    print(f"[borderline identity] {comment_id}: {identity_score:.2f} :: {cleaned_text[:160]}")
+                
+                # Telemetry: Check for protected terms with low identity scores
+                txt_for_scan = cleaned_text.lower()
+                if any(w in txt_for_scan for w in PROTECTED_TERMS):
+                    ia = scores.get("identity_attack", 0.0)
+                    if ia < thresholds["identity_attack"]["high"]:
+                        print(f"[identity low but protected-term present] {comment_id} "
+                              f"IA={ia:.2f} :: {txt_for_scan[:180]}")
+                
+                if is_flagged:
+                    flagged_count += 1
+                
+                # Store results
+                cursor.execute("""
+                    INSERT OR REPLACE INTO toxicity_classifications 
+                    (id, item_type, text_cleaned, is_deleted, is_removed, is_empty,
+                     toxic, insult, identity_attack, threat, sexual_explicit, severe_toxic, severe_toxicity,
+                     classification_timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    comment_id, "comment", cleaned_text, flags["is_deleted"], flags["is_removed"], flags["is_empty"],
+                    scores.get("toxic", 0), scores.get("insult", 0), scores.get("identity_attack", 0),
+                    scores.get("threat", 0), scores.get("sexual_explicit", 0), scores.get("severe_toxic", 0),
+                    scores.get("severe_toxicity", 0), datetime.now().isoformat()
+                ))
+            
+            # Clear batch
+            comment_batch = []
+            comment_data = []
+        
+        if processed_count % 50 == 0:
+            print(f"   Processed {processed_count} items...")
+    
+    # Process remaining comments in final batch
+    if comment_batch:
+        batch_scores = classify_toxicity_batch(comment_batch, tokenizer, model)
+        
+        for i, (comment_id, cleaned_text, flags) in enumerate(comment_data):
+            scores = batch_scores[i]
             
             # Check if flagged
             is_flagged = any(
@@ -330,14 +437,14 @@ def process_all_items(db_path: str, batch_size: int = 32):
             # Log borderline identity attacks for review
             identity_score = scores.get("identity_attack", 0)
             if 0.30 <= identity_score < thresholds["identity_attack"]["high"]:
-                print(f"[borderline identity] {post_id if 'post_id' in locals() else comment_id}: {identity_score:.2f} :: {cleaned_text[:160]}")
+                print(f"[borderline identity] {comment_id}: {identity_score:.2f} :: {cleaned_text[:160]}")
             
             # Telemetry: Check for protected terms with low identity scores
             txt_for_scan = cleaned_text.lower()
             if any(w in txt_for_scan for w in PROTECTED_TERMS):
                 ia = scores.get("identity_attack", 0.0)
                 if ia < thresholds["identity_attack"]["high"]:
-                    print(f"[identity low but protected-term present] {post_id if 'post_id' in locals() else comment_id} "
+                    print(f"[identity low but protected-term present] {comment_id} "
                           f"IA={ia:.2f} :: {txt_for_scan[:180]}")
             
             if is_flagged:
@@ -356,10 +463,6 @@ def process_all_items(db_path: str, batch_size: int = 32):
                 scores.get("threat", 0), scores.get("sexual_explicit", 0), scores.get("severe_toxic", 0),
                 scores.get("severe_toxicity", 0), datetime.now().isoformat()
             ))
-        
-        processed_count += 1
-        if processed_count % 50 == 0:
-            print(f"   Processed {processed_count} items...")
     
     conn.commit()
     conn.close()
