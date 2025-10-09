@@ -99,9 +99,8 @@ python src/export_to_local_db.py
 
 Watch the toxicity analysis dashboard in action:
 
-[[https://github.com/ardadinc/Prototype-Reddit-NYU-Abuse/blob/main/Screen%20Recording%202025-10-09%20at%202.48.58%20PM.mp4
-](https://github.com/Arda-Dinc04/Prototype-Reddit-NYU-Abuse/issues/1#issue-3500294597)
-](https://github.com/user-attachments/assets/35904d90-0771-40c5-9d3e-263a768c7bdb)
+
+https://github.com/user-attachments/assets/35904d90-0771-40c5-9d3e-263a768c7bdb
 
 _Screen recording showing the Streamlit dashboard with toxicity classification results, flagged content review, and filtering capabilities._
 
