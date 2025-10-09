@@ -1,0 +1,236 @@
+import json, time, argparse
+from datetime import datetime, timedelta, timezone
+import praw
+import boto3
+from botocore.exceptions import ClientError
+from config import (
+    REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USER_AGENT,
+    SUBREDDIT, BACKFILL_DAYS, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+    AWS_REGION, S3_BUCKET_NAME, DYNAMODB_TABLE_NAME
+)
+
+class RedditS3Ingester:
+    def __init__(self):
+        """Initialize Reddit client and AWS services"""
+        self.reddit = praw.Reddit(
+            client_id=REDDIT_CLIENT_ID,
+            client_secret=REDDIT_CLIENT_SECRET,
+            user_agent=REDDIT_USER_AGENT
+        )
+        
+        self.s3_client = boto3.client(
+            's3',
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+            region_name=AWS_REGION
+        )
+        
+        self.dynamodb = boto3.resource(
+            'dynamodb',
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+            region_name=AWS_REGION
+        )
+        
+        self.table = self.dynamodb.Table(DYNAMODB_TABLE_NAME)
+        
+    def ensure_bucket_exists(self):
+        """Ensure S3 bucket exists"""
+        try:
+            self.s3_client.head_bucket(Bucket=S3_BUCKET_NAME)
+            print(f"✅ S3 bucket '{S3_BUCKET_NAME}' exists")
+        except ClientError as e:
+            if e.response['Error']['Code'] == '404':
+                print(f"📦 Creating S3 bucket '{S3_BUCKET_NAME}'...")
+                if AWS_REGION == 'us-east-1':
+                    self.s3_client.create_bucket(Bucket=S3_BUCKET_NAME)
+                else:
+                    self.s3_client.create_bucket(
+                        Bucket=S3_BUCKET_NAME,
+                        CreateBucketConfiguration={'LocationConstraint': AWS_REGION}
+                    )
+                print(f"✅ Created S3 bucket '{S3_BUCKET_NAME}'")
+            else:
+                raise
+    
+    def ensure_dynamodb_table_exists(self):
+        """Ensure DynamoDB table exists"""
+        try:
+            self.table.load()
+            print(f"✅ DynamoDB table '{DYNAMODB_TABLE_NAME}' exists")
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'ResourceNotFoundException':
+                print(f"📦 Creating DynamoDB table '{DYNAMODB_TABLE_NAME}'...")
+                table = self.dynamodb.create_table(
+                    TableName=DYNAMODB_TABLE_NAME,
+                    KeySchema=[
+                        {'AttributeName': 'id', 'KeyType': 'HASH'},
+                        {'AttributeName': 'timestamp', 'KeyType': 'RANGE'}
+                    ],
+                    AttributeDefinitions=[
+                        {'AttributeName': 'id', 'AttributeType': 'S'},
+                        {'AttributeName': 'timestamp', 'AttributeType': 'S'}
+                    ],
+                    BillingMode='PAY_PER_REQUEST'
+                )
+                table.wait_until_exists()
+                print(f"✅ Created DynamoDB table '{DYNAMODB_TABLE_NAME}'")
+            else:
+                raise
+    
+    def get_s3_key(self, item_id, item_type, timestamp):
+        """Generate S3 key for storing data"""
+        date_str = timestamp.strftime("%Y/%m/%d")
+        return f"raw-data/{date_str}/{item_type}/{item_id}.json"
+    
+    def store_item_in_s3(self, item_data, item_id, item_type, timestamp):
+        """Store individual item as JSON in S3"""
+        try:
+            s3_key = self.get_s3_key(item_id, item_type, timestamp)
+            
+            # Convert to JSON
+            json_data = json.dumps(item_data, default=str, indent=2)
+            
+            # Upload to S3
+            self.s3_client.put_object(
+                Bucket=S3_BUCKET_NAME,
+                Key=s3_key,
+                Body=json_data,
+                ContentType='application/json'
+            )
+            
+            return s3_key
+        except Exception as e:
+            print(f"❌ Failed to store {item_id} in S3: {e}")
+            return None
+    
+    def store_metadata_in_dynamodb(self, item_id, item_type, timestamp, s3_key, reddit_data):
+        """Store metadata in DynamoDB"""
+        try:
+            metadata = {
+                'id': item_id,
+                'timestamp': timestamp.isoformat(),
+                'type': item_type,
+                's3_key': s3_key,
+                'subreddit': SUBREDDIT,
+                'author': str(reddit_data.author) if reddit_data.author else None,
+                'score': reddit_data.score,
+                'created_utc': int(reddit_data.created_utc),
+                'num_comments': getattr(reddit_data, 'num_comments', None),
+                'title': getattr(reddit_data, 'title', None),
+                'body_length': len(getattr(reddit_data, 'body', '') or getattr(reddit_data, 'selftext', '') or ''),
+                'processed_at': datetime.now(timezone.utc).isoformat()
+            }
+            
+            self.table.put_item(Item=metadata)
+            return True
+        except Exception as e:
+            print(f"❌ Failed to store metadata for {item_id}: {e}")
+            return False
+    
+    def process_reddit_item(self, item, item_type):
+        """Process a single Reddit item (post or comment)"""
+        try:
+            item_id = item.id
+            timestamp = datetime.fromtimestamp(item.created_utc, tz=timezone.utc)
+            
+            # Prepare data for storage
+            item_data = {
+                'id': item_id,
+                'type': item_type,
+                'subreddit': SUBREDDIT,
+                'author': str(item.author) if item.author else None,
+                'created_utc': item.created_utc,
+                'timestamp': timestamp.isoformat(),
+                'score': item.score,
+                'raw_data': {
+                    'title': getattr(item, 'title', None),
+                    'body': getattr(item, 'body', None) or getattr(item, 'selftext', None),
+                    'url': getattr(item, 'url', None),
+                    'permalink': getattr(item, 'permalink', None),
+                    'num_comments': getattr(item, 'num_comments', None),
+                    'upvote_ratio': getattr(item, 'upvote_ratio', None),
+                    'is_self': getattr(item, 'is_self', None),
+                    'over_18': getattr(item, 'over_18', None),
+                    'spoiler': getattr(item, 'spoiler', None),
+                    'locked': getattr(item, 'locked', None),
+                    'stickied': getattr(item, 'stickied', None),
+                    'parent_id': getattr(item, 'parent_id', None),
+                    'link_id': getattr(item, 'link_id', None),
+                }
+            }
+            
+            # Store in S3
+            s3_key = self.store_item_in_s3(item_data, item_id, item_type, timestamp)
+            if not s3_key:
+                return False
+            
+            # Store metadata in DynamoDB
+            success = self.store_metadata_in_dynamodb(item_id, item_type, timestamp, s3_key, item)
+            
+            if success:
+                print(f"✅ Stored {item_type}: {item_id}")
+                return True
+            else:
+                return False
+                
+        except Exception as e:
+            print(f"❌ Error processing {item_type} {item.id}: {e}")
+            return False
+    
+    def ingest_posts_and_comments(self, days):
+        """Main ingestion function"""
+        print(f"🚀 Starting Reddit ingestion for r/{SUBREDDIT} (last {days} days)")
+        
+        # Ensure AWS resources exist
+        self.ensure_bucket_exists()
+        self.ensure_dynamodb_table_exists()
+        
+        # Calculate time range
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        since_epoch = since.timestamp()
+        
+        print(f"📅 Collecting data since: {since.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        
+        # Get subreddit
+        sr = self.reddit.subreddit(SUBREDDIT)
+        
+        posts_processed = 0
+        comments_processed = 0
+        
+        # Process posts
+        print("📝 Processing posts...")
+        for post in sr.new(limit=2000):  # Cap for prototype
+            if post.created_utc < since_epoch:
+                continue
+                
+            if self.process_reddit_item(post, 'post'):
+                posts_processed += 1
+            
+            # Process comments for this post
+            try:
+                post.comments.replace_more(limit=0)
+                for comment in post.comments.list():
+                    if comment.created_utc >= since_epoch:
+                        if self.process_reddit_item(comment, 'comment'):
+                            comments_processed += 1
+            except Exception as e:
+                print(f"⚠️ Error processing comments for post {post.id}: {e}")
+        
+        print(f"\n📊 Ingestion Complete!")
+        print(f"   Posts processed: {posts_processed}")
+        print(f"   Comments processed: {comments_processed}")
+        print(f"   Total items: {posts_processed + comments_processed}")
+        print(f"   Data stored in: s3://{S3_BUCKET_NAME}/raw-data/")
+        print(f"   Metadata in: DynamoDB table '{DYNAMODB_TABLE_NAME}'")
+
+def main():
+    parser = argparse.ArgumentParser(description='Ingest Reddit data to S3')
+    parser.add_argument('--days', type=int, default=BACKFILL_DAYS, help='Number of days to backfill')
+    args = parser.parse_args()
+    
+    ingester = RedditS3Ingester()
+    ingester.ingest_posts_and_comments(args.days)
+
+if __name__ == "__main__":
+    main()

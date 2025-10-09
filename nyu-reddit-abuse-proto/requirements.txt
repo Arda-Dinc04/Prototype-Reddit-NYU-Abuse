@@ -1,0 +1,12 @@
+# Core dependencies
+praw==7.7.1
+python-dotenv==1.0.1
+boto3==1.35.0
+botocore==1.35.0
+
+# Data analysis (optional)
+pandas==2.2.3
+
+# Dashboard (optional)
+streamlit==1.38.0
+plotly==5.24.1
