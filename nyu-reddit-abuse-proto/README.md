@@ -75,6 +75,16 @@ python browse_data.py
 python view_db.py
 ```
 
+### 5. Local Database (For Collaborators)
+
+```bash
+# Export AWS data to local SQLite (requires AWS access)
+python src/export_to_local_db.py
+
+# This creates nyu_reddit_local.sqlite with all collected data
+# Collaborators can work with this database without AWS credentials
+```
+
 ## 📊 Current Dataset
 
 - **Posts**: 55 posts from r/nyu
@@ -110,6 +120,15 @@ Centralized configuration:
 - Environment variable loading
 - AWS and Reddit settings
 - Default values
+
+### `src/export_to_local_db.py`
+
+Local database export utility:
+
+- Exports AWS data to SQLite for collaboration
+- Converts DynamoDB data types to SQLite format
+- Includes raw JSON data from S3
+- Enables offline development
 
 ## 📈 Data Structure
 
