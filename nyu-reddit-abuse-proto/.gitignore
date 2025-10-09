@@ -42,9 +42,10 @@ Thumbs.db
 # Logs
 *.log
 
-# Database files
+# Database files (except sample database for collaborators)
 *.sqlite
 *.db
+!nyu_reddit_local.sqlite
 
 # AWS credentials (backup)
 *.pem
