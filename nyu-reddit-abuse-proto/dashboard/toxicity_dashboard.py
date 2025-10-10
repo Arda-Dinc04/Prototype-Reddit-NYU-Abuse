@@ -13,6 +13,22 @@ import sqlite3
 from datetime import datetime, timedelta
 import json
 
+@st.cache_data
+def load_topic_mentions(db_path: str):
+    conn = sqlite3.connect(db_path)
+    dfm = pd.read_sql_query("SELECT * FROM topic_mentions_daily ORDER BY day", conn)
+    conn.close()
+    dfm["day"] = pd.to_datetime(dfm["day"])
+    return dfm
+
+@st.cache_data
+def load_topic_mentions_cat(db_path: str):
+    conn = sqlite3.connect(db_path)
+    df = pd.read_sql_query("SELECT * FROM topic_mentions_cat_daily ORDER BY day", conn)
+    conn.close()
+    df["day"] = pd.to_datetime(df["day"])
+    return df
+
 # Page configuration
 st.set_page_config(
     page_title="NYU Reddit Toxicity Analysis",
@@ -253,6 +269,91 @@ def main():
     
     fig_trends.update_layout(height=500)
     st.plotly_chart(fig_trends, use_container_width=True)
+    
+    # Topic Mentions section
+    st.markdown("---")
+    st.subheader("🧵 Topic Mentions Over Time")
+
+    # Load mentions
+    mentions_df = load_topic_mentions("/Users/ardadinc/Desktop/Prototype-Reddit-NYU-Abuse/nyu-reddit-abuse-proto/nyu_reddit_local.sqlite")
+    if mentions_df.empty:
+        st.info("Run `python src/compute_topic_mentions.py` to populate topic mentions.")
+    else:
+        # Default terms
+        all_terms = sorted(mentions_df["term"].unique().tolist())
+        default_terms = [t for t in ["black","asian","white","racism","financial aid"] if t in all_terms]
+
+        # Date range filter for topics
+        min_day = mentions_df["day"].min().date()
+        max_day = mentions_df["day"].max().date()
+        dr = st.date_input("Date Range (topics)", (min_day, max_day), min_value=min_day, max_value=max_day, key="topics_date")
+        if isinstance(dr, tuple) and len(dr) == 2:
+            start_day, end_day = dr
+            mdf = mentions_df[(mentions_df["day"].dt.date >= start_day) & (mentions_df["day"].dt.date <= end_day)]
+        else:
+            mdf = mentions_df.copy()
+
+        terms = st.multiselect("Terms to plot", options=all_terms, default=default_terms)
+        metric = st.radio("Metric", ["Count", "Per 1k items"], horizontal=True)
+        ycol = "count" if metric == "Count" else "rate_per_1k"
+
+        if terms:
+            plot_df = mdf[mdf["term"].isin(terms)]
+            fig = px.line(plot_df, x="day", y=ycol, color="term", markers=True,
+                          title=f"Topic mentions ({ycol})")
+            fig.update_layout(hovermode="x unified", height=420)
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.caption("Tip: counts are binary-per-item; a single post/comment mentioning a term counts once.")
+        else:
+            st.info("Select at least one term to visualize.")
+    
+    # Topic Categories section
+    st.markdown("---")
+    st.subheader("🧵 Topic Categories Over Time")
+    
+    DB_PATH = "/Users/ardadinc/Desktop/Prototype-Reddit-NYU-Abuse/nyu-reddit-abuse-proto/nyu_reddit_local.sqlite"
+    mcat = load_topic_mentions_cat(DB_PATH)
+    
+    if mcat.empty:
+        st.info("Run `python src/compute_topic_mentions.py` to populate category mentions.")
+    else:
+        categories = ["race_ethnicity","countries","gender_sexuality","profanity","academics_finance","safety_crime","housing"]
+        pretty = {
+            "race_ethnicity":"Race/Ethnicity",
+            "countries":"Countries",
+            "gender_sexuality":"Gender & Sexuality",
+            "profanity":"Profanity",
+            "academics_finance":"Academics & Finance",
+            "safety_crime":"Safety/Crime",
+            "housing":"Housing"
+        }
+        
+        tabs = st.tabs([pretty[c] for c in categories])
+        
+        # Global controls
+        metric = st.radio("Metric", ["Count", "Per 1k items"], horizontal=True, key="topic_metric")
+        ycol = "count" if metric=="Count" else "rate_per_1k"
+        
+        # Date filter
+        min_day, max_day = mcat["day"].min().date(), mcat["day"].max().date()
+        dr = st.date_input("Date Range (topics)", (min_day, max_day), min_value=min_day, max_value=max_day, key="topics_date2")
+        if isinstance(dr, tuple) and len(dr)==2:
+            start, end = dr
+            mcat = mcat[(mcat["day"].dt.date >= start) & (mcat["day"].dt.date <= end)]
+        
+        for cat, tab in zip(categories, tabs):
+            with tab:
+                dfc = mcat[mcat["category"]==cat]
+                terms = sorted(dfc["term"].unique().tolist())
+                selected = st.multiselect(f"Terms in {pretty[cat]}", terms, default=terms[:min(5,len(terms))], key=f"sel_{cat}")
+                if selected:
+                    plot_df = dfc[dfc["term"].isin(selected)]
+                    fig = px.line(plot_df, x="day", y=ycol, color="term", markers=True)
+                    fig.update_layout(hovermode="x unified", height=360, title=f"{pretty[cat]} ({ycol})")
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("Select at least one term.")
     
     # Flagged content section
     st.markdown("---")
