@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Toxicity Classification Pipeline
+Toxicity Classification Pipeline with HateBERT
 Uses GroNLP/hate-bert-base-uncased to classify posts and comments
 """
 
@@ -18,7 +18,7 @@ import pandas as pd
 # Add src to path for imports
 sys.path.append(os.path.dirname(__file__))
 
-# Protected terms for identity attack detection
+# Protected terms for hate speech detection
 PROTECTED_TERMS = {
     "black", "asian", "white", "latino", "muslim", "jew", "jewish", "christian", "arab",
     "indian", "gay", "trans", "lgbt", "women", "female", "male", "immigrant", "chinese",
@@ -82,44 +82,48 @@ def clean_text(text: str) -> Tuple[str, Dict[str, bool]]:
     
     Returns:
         cleaned_text: Cleaned text ready for classification
-        flags: Dictionary with deletion/removal flags
+        flags: Dictionary with flags for deleted/removed/empty content
     """
-    if not text or text.strip() == "":
-        return "", {"is_deleted": False, "is_removed": False, "is_empty": True}
-    
-    # Check for deleted/removed content
     flags = {
-        "is_deleted": text.strip() == "[deleted]",
-        "is_removed": text.strip() == "[removed]",
-        "is_empty": False
+        "is_deleted": False,
+        "is_removed": False,
+        "is_empty": False,
     }
     
-    if flags["is_deleted"] or flags["is_removed"]:
-        return text, flags
+    if not text or text.strip() == "":
+        flags["is_empty"] = True
+        return "", flags
     
-    # Core text cleaning
-    cleaned = text
+    # Handle deleted/removed content
+    if text.strip().lower() == "[deleted]":
+        flags["is_deleted"] = True
+        return "", flags
+    if text.strip().lower() == "[removed]":
+        flags["is_removed"] = True
+        return "", flags
+    
+    # Clean text
+    cleaned = text.strip()
     
     # Remove URLs
-    cleaned = re.sub(r"http\S+|www\S+|https\S+", "", cleaned)
+    cleaned = re.sub(r'http\S+|www\S+|https\S+', '', cleaned)
     
     # Remove usernames & mentions
-    cleaned = re.sub(r"u/[A-Za-z0-9_-]+", "<USER>", cleaned)
-    cleaned = re.sub(r"@[A-Za-z0-9_-]+", "<USER>", cleaned)
+    cleaned = re.sub(r'u/[A-Za-z0-9_-]+', '<USER>', cleaned)
+    cleaned = re.sub(r'@[A-Za-z0-9_-]+', '<USER>', cleaned)
     
-    # Strip Markdown artifacts (basic)
-    cleaned = re.sub(r"&[a-zA-Z]+;", "", cleaned)  # HTML entities
-    cleaned = re.sub(r"&amp;", "&", cleaned)
-    cleaned = re.sub(r"&lt;", "<", cleaned)
-    cleaned = re.sub(r"&gt;", ">", cleaned)
+    # Strip Markdown & HTML artifacts (basic)
+    cleaned = re.sub(r'&amp;', '&', cleaned)  # Decode HTML entities
+    cleaned = re.sub(r'&lt;', '<', cleaned)
+    cleaned = re.sub(r'&gt;', '>', cleaned)
+    cleaned = re.sub(r'\[.*?\]\(.*?\)', '', cleaned)  # Remove markdown links
+    cleaned = re.sub(r'[*_~`]+', '', cleaned)  # Remove bold/italics/strikethrough
+    cleaned = re.sub(r'> ', '', cleaned)  # Remove blockquotes
     
-    # Remove quote markers
-    cleaned = re.sub(r"^>\s*", "", cleaned, flags=re.MULTILINE)
+    # Normalize whitespace & special chars
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
     
-    # Normalize whitespace
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    
-    # Lowercase
+    # Lowercasing
     cleaned = cleaned.lower()
     
     flags["is_empty"] = len(cleaned.strip()) == 0
@@ -127,10 +131,10 @@ def clean_text(text: str) -> Tuple[str, Dict[str, bool]]:
     return cleaned, flags
 
 def get_toxicity_thresholds():
-    """Get toxicity classification thresholds - optimized for HateBERT"""
+    """Get toxicity classification thresholds - optimized for dehatebert"""
     return {
-        "LABEL_0": {"high": 0.70, "medium": 0.50},  # Non-hate
-        "LABEL_1": {"high": 0.70, "medium": 0.50},  # Hate speech
+        "NON_HATE": {"high": 0.20, "medium": 0.20},  # Non-hate
+        "HATE": {"high": 0.20, "medium": 0.20},      # Hate speech
     }
 
 def classify_toxicity_batch(texts: List[str], tokenizer, model) -> List[Dict[str, float]]:
@@ -200,9 +204,12 @@ def update_db_schema(db_path: str):
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
-    # Create classification results table for HateBERT
+    # Drop existing table if it exists (to avoid schema conflicts)
+    cursor.execute("DROP TABLE IF EXISTS toxicity_classifications")
+    
+    # Create classification results table for dehatebert
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS toxicity_classifications (
+        CREATE TABLE toxicity_classifications (
             id TEXT PRIMARY KEY,
             item_type TEXT CHECK(item_type IN ('post', 'comment')),
             text_cleaned TEXT,
@@ -224,14 +231,14 @@ def update_db_schema(db_path: str):
     conn.close()
     print("✅ Updated database schema with toxicity classifications table")
 
-def process_all_items(db_path: str, batch_size: int = 32):
+def process_all_items(db_path: str, batch_size: int = 64):
     """Process all posts and comments for toxicity classification"""
     
-    print("🚀 Starting toxicity classification pipeline...")
+    print("🚀 Starting HateBERT toxicity classification pipeline...")
     
     # Load model
-    print("📦 Loading toxicity model...")
-    model_name = "GroNLP/hate-bert-base-uncased"
+    print("📦 Loading hate speech detection model...")
+    model_name = "Hate-speech-CNERG/dehatebert-mono-english"  # Specialized hate speech model
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForSequenceClassification.from_pretrained(model_name)
     model.eval()
@@ -256,7 +263,7 @@ def process_all_items(db_path: str, batch_size: int = 32):
     processed_count = 0
     flagged_count = 0
     thresholds = get_toxicity_thresholds()
-    BATCH_SIZE = 64
+    BATCH_SIZE = batch_size
 
     # Process posts
     for post_id, raw_json in posts:
@@ -284,19 +291,19 @@ def process_all_items(db_path: str, batch_size: int = 32):
             # Classify toxicity
             scores = classify_toxicity(deobfuscated_text, tokenizer, model)
             
-            # Check if flagged (HateBERT binary classification)
-            is_flagged = scores.get("LABEL_1", 0) >= thresholds["LABEL_1"]["high"]  # Hate speech
+            # Check if flagged (dehatebert binary classification)
+            is_flagged = scores.get("HATE", 0) >= thresholds["HATE"]["high"]  # Hate speech
             
             # Log borderline hate speech for review
-            hate_score = scores.get("LABEL_1", 0)
-            if 0.30 <= hate_score < thresholds["LABEL_1"]["high"]:
+            hate_score = scores.get("HATE", 0)
+            if 0.05 <= hate_score < thresholds["HATE"]["high"]:
                 print(f"[borderline hate] {post_id}: {hate_score:.2f} :: {cleaned_text[:160]}")
             
             # Telemetry: Check for protected terms with low hate scores
             txt_for_scan = cleaned_text.lower()
             if any(w in txt_for_scan for w in PROTECTED_TERMS):
-                hate_score = scores.get("LABEL_1", 0.0)
-                if hate_score < thresholds["LABEL_1"]["high"]:
+                hate_score = scores.get("HATE", 0.0)
+                if hate_score < thresholds["HATE"]["high"]:
                     print(f"[hate low but protected-term present] {post_id} "
                           f"Hate={hate_score:.2f} :: {txt_for_scan[:180]}")
             
@@ -311,7 +318,7 @@ def process_all_items(db_path: str, batch_size: int = 32):
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 post_id, "post", cleaned_text, flags["is_deleted"], flags["is_removed"], flags["is_empty"],
-                scores.get("LABEL_0", 0), scores.get("LABEL_1", 0), datetime.now().isoformat()
+                scores.get("NON_HATE", 0), scores.get("HATE", 0), datetime.now().isoformat()
             ))
         
         processed_count += 1
@@ -361,24 +368,21 @@ def process_all_items(db_path: str, batch_size: int = 32):
             for i, (comment_id, cleaned_text, flags) in enumerate(comment_data):
                 scores = batch_scores[i]
                 
-                # Check if flagged
-                is_flagged = any(
-                    scores.get(label, 0) >= thresholds.get(label, {}).get("high", 0.7)
-                    for label in ["toxic", "insult", "identity_attack", "threat", "sexual_explicit", "severe_toxic", "severe_toxicity"]
-                )
+                # Check if flagged (dehatebert binary classification)
+                is_flagged = scores.get("HATE", 0) >= thresholds["HATE"]["high"]  # Hate speech
                 
-                # Log borderline identity attacks for review
-                identity_score = scores.get("identity_attack", 0)
-                if 0.30 <= identity_score < thresholds["identity_attack"]["high"]:
-                    print(f"[borderline identity] {comment_id}: {identity_score:.2f} :: {cleaned_text[:160]}")
+                # Log borderline hate speech for review
+                hate_score = scores.get("HATE", 0)
+                if 0.05 <= hate_score < thresholds["HATE"]["high"]:
+                    print(f"[borderline hate] {comment_id}: {hate_score:.2f} :: {cleaned_text[:160]}")
                 
-                # Telemetry: Check for protected terms with low identity scores
+                # Telemetry: Check for protected terms with low hate scores
                 txt_for_scan = cleaned_text.lower()
                 if any(w in txt_for_scan for w in PROTECTED_TERMS):
-                    ia = scores.get("identity_attack", 0.0)
-                    if ia < thresholds["identity_attack"]["high"]:
-                        print(f"[identity low but protected-term present] {comment_id} "
-                              f"IA={ia:.2f} :: {txt_for_scan[:180]}")
+                    hate_score = scores.get("HATE", 0.0)
+                    if hate_score < thresholds["HATE"]["high"]:
+                        print(f"[hate low but protected-term present] {comment_id} "
+                              f"Hate={hate_score:.2f} :: {txt_for_scan[:180]}")
                 
                 if is_flagged:
                     flagged_count += 1
@@ -387,14 +391,11 @@ def process_all_items(db_path: str, batch_size: int = 32):
                 cursor.execute("""
                     INSERT OR REPLACE INTO toxicity_classifications 
                     (id, item_type, text_cleaned, is_deleted, is_removed, is_empty,
-                     toxic, insult, identity_attack, threat, sexual_explicit, severe_toxic, severe_toxicity,
-                     classification_timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     non_hate, hate_speech, classification_timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     comment_id, "comment", cleaned_text, flags["is_deleted"], flags["is_removed"], flags["is_empty"],
-                    scores.get("toxic", 0), scores.get("insult", 0), scores.get("identity_attack", 0),
-                    scores.get("threat", 0), scores.get("sexual_explicit", 0), scores.get("severe_toxic", 0),
-                    scores.get("severe_toxicity", 0), datetime.now().isoformat()
+                    scores.get("NON_HATE", 0), scores.get("HATE", 0), datetime.now().isoformat()
                 ))
             
             # Clear batch
@@ -411,24 +412,21 @@ def process_all_items(db_path: str, batch_size: int = 32):
         for i, (comment_id, cleaned_text, flags) in enumerate(comment_data):
             scores = batch_scores[i]
             
-            # Check if flagged
-            is_flagged = any(
-                scores.get(label, 0) >= thresholds.get(label, {}).get("high", 0.7)
-                for label in ["toxic", "insult", "identity_attack", "threat", "sexual_explicit", "severe_toxic", "severe_toxicity"]
-            )
+            # Check if flagged (dehatebert binary classification)
+            is_flagged = scores.get("HATE", 0) >= thresholds["HATE"]["high"]  # Hate speech
             
-            # Log borderline identity attacks for review
-            identity_score = scores.get("identity_attack", 0)
-            if 0.30 <= identity_score < thresholds["identity_attack"]["high"]:
-                print(f"[borderline identity] {comment_id}: {identity_score:.2f} :: {cleaned_text[:160]}")
+            # Log borderline hate speech for review
+            hate_score = scores.get("HATE", 0)
+            if 0.05 <= hate_score < thresholds["HATE"]["high"]:
+                print(f"[borderline hate] {comment_id}: {hate_score:.2f} :: {cleaned_text[:160]}")
             
-            # Telemetry: Check for protected terms with low identity scores
+            # Telemetry: Check for protected terms with low hate scores
             txt_for_scan = cleaned_text.lower()
             if any(w in txt_for_scan for w in PROTECTED_TERMS):
-                ia = scores.get("identity_attack", 0.0)
-                if ia < thresholds["identity_attack"]["high"]:
-                    print(f"[identity low but protected-term present] {comment_id} "
-                          f"IA={ia:.2f} :: {txt_for_scan[:180]}")
+                hate_score = scores.get("HATE", 0.0)
+                if hate_score < thresholds["HATE"]["high"]:
+                    print(f"[hate low but protected-term present] {comment_id} "
+                          f"Hate={hate_score:.2f} :: {txt_for_scan[:180]}")
             
             if is_flagged:
                 flagged_count += 1
@@ -437,38 +435,27 @@ def process_all_items(db_path: str, batch_size: int = 32):
             cursor.execute("""
                 INSERT OR REPLACE INTO toxicity_classifications 
                 (id, item_type, text_cleaned, is_deleted, is_removed, is_empty,
-                 toxic, insult, identity_attack, threat, sexual_explicit, severe_toxic, severe_toxicity,
-                 classification_timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 non_hate, hate_speech, classification_timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 comment_id, "comment", cleaned_text, flags["is_deleted"], flags["is_removed"], flags["is_empty"],
-                scores.get("toxic", 0), scores.get("insult", 0), scores.get("identity_attack", 0),
-                scores.get("threat", 0), scores.get("sexual_explicit", 0), scores.get("severe_toxic", 0),
-                scores.get("severe_toxicity", 0), datetime.now().isoformat()
+                scores.get("NON_HATE", 0), scores.get("HATE", 0), datetime.now().isoformat()
             ))
     
     conn.commit()
     conn.close()
     
-    print(f"\n🎉 Classification complete!")
+    print(f"\n🎉 DehateBERT Classification complete!")
     print(f"   Total processed: {processed_count}")
     print(f"   Flagged items: {flagged_count}")
-    print(f"   Flagged rate: {flagged_count/processed_count*100:.1f}%")
+    print(f"   Flagged rate: {flagged_count / processed_count * 100:.1f}%")
 
-def main():
-    """Main function"""
-    db_path = "nyu_reddit_local.sqlite"
-    
-    if not os.path.exists(db_path):
-        print(f"❌ Database not found: {db_path}")
-        print("Make sure you have the local database file.")
-        return
-    
-    # Update database schema
+def main(db_path: str = "nyu_reddit_local.sqlite"):
+    """Main function to run HateBERT classification"""
     update_db_schema(db_path)
-    
-    # Process all items
     process_all_items(db_path)
 
 if __name__ == "__main__":
     main()
+
+

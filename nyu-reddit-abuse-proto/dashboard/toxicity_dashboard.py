@@ -24,7 +24,7 @@ st.set_page_config(
 @st.cache_data
 def load_data():
     """Load toxicity classification data from SQLite"""
-    conn = sqlite3.connect("nyu_reddit_local.sqlite")
+    conn = sqlite3.connect("/Users/ardadinc/Desktop/Prototype-Reddit-NYU-Abuse/nyu-reddit-abuse-proto/nyu_reddit_local.sqlite")
     
     # Get toxicity classifications with original data
     query = """
@@ -45,7 +45,8 @@ def load_data():
     FROM toxicity_classifications tc
     LEFT JOIN posts p ON tc.id = p.id AND tc.item_type = 'post'
     LEFT JOIN comments c ON tc.id = c.id AND tc.item_type = 'comment'
-    ORDER BY tc.classification_timestamp DESC
+    WHERE tc.hate_speech >= 0.20
+    ORDER BY tc.hate_speech DESC, tc.classification_timestamp DESC
     """
     
     df = pd.read_sql_query(query, conn)
@@ -63,30 +64,26 @@ def load_data():
     return df
 
 def get_toxicity_thresholds():
-    """Get toxicity thresholds for flagging - optimized for identity attack recall"""
+    """Get toxicity thresholds for flagging - optimized for dehatebert"""
     return {
-        "toxic": {"high": 0.70, "medium": 0.50},
-        "insult": {"high": 0.78, "medium": 0.55},          # keep ~0.78
-        "identity_attack": {"high": 0.58, "medium": 0.38}, # lowered for better recall
-        "threat": {"high": 0.68, "medium": 0.55},
-        "sexual_explicit": {"high": 0.75, "medium": 0.55},
-        "severe_toxic": {"high": 0.80, "medium": 0.60},
-        "severe_toxicity": {"high": 0.80, "medium": 0.60}
+        "non_hate": {"high": 0.20, "medium": 0.20},
+        "hate_speech": {"high": 0.20, "medium": 0.20}
     }
 
 def is_flagged(row, thresholds):
-    """Check if an item is flagged based on thresholds"""
-    for label, threshold_info in thresholds.items():
-        if row.get(label, 0) >= threshold_info["high"]:
-            return True
-    return False
+    """Check if an item is flagged based on thresholds - only flag hate_speech"""
+    # Only flag based on hate_speech score, not non_hate
+    hate_score = row.get('hate_speech', 0)
+    hate_threshold = thresholds.get('hate_speech', {}).get('high', 0.50)
+    return hate_score >= hate_threshold
 
 def get_flag_reasons(row, thresholds):
-    """Get reasons why an item was flagged"""
+    """Get reasons why an item was flagged - only hate_speech"""
     reasons = []
-    for label, threshold_info in thresholds.items():
-        if row.get(label, 0) >= threshold_info["high"]:
-            reasons.append(f"{label} ({row.get(label, 0):.2f})")
+    hate_score = row.get('hate_speech', 0)
+    hate_threshold = thresholds.get('hate_speech', {}).get('high', 0.50)
+    if hate_score >= hate_threshold:
+        reasons.append(f"hate_speech ({hate_score:.2f})")
     return ", ".join(reasons)
 
 def extract_original_content(row):
@@ -104,7 +101,8 @@ def extract_original_content(row):
         return '', '', 'Unknown'
 
 def main():
-    st.title("🔍 NYU Reddit Toxicity Analysis Dashboard")
+    st.title("🚨 NYU Reddit Flagged Content Dashboard")
+    st.markdown("**Showing only items flagged for hate speech (score ≥ 0.20)**")
     st.markdown("---")
     
     # Load data
@@ -147,50 +145,42 @@ def main():
     if content_types:
         df_filtered = df_filtered[df_filtered['item_type'].isin(content_types)]
     
-    # Flagged only filter
-    show_flagged_only = st.sidebar.checkbox("Show flagged items only", value=False)
-    if show_flagged_only:
-        df_filtered = df_filtered[df_filtered['is_flagged'] == True]
     
     # Main dashboard
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.metric("Total Items", len(df_filtered))
+        st.metric("Flagged Items", len(df_filtered))
     
     with col2:
-        flagged_count = len(df_filtered[df_filtered['is_flagged'] == True])
-        st.metric("Flagged Items", flagged_count)
+        high_hate_count = len(df_filtered[df_filtered['hate_speech'] >= 0.50])
+        st.metric("High Hate (≥0.50)", high_hate_count)
     
     with col3:
-        if len(df_filtered) > 0:
-            flagged_rate = (flagged_count / len(df_filtered)) * 100
-            st.metric("Flagged Rate", f"{flagged_rate:.1f}%")
-        else:
-            st.metric("Flagged Rate", "0%")
+        medium_hate_count = len(df_filtered[(df_filtered['hate_speech'] >= 0.30) & (df_filtered['hate_speech'] < 0.50)])
+        st.metric("Medium Hate (0.30-0.50)", medium_hate_count)
     
     with col4:
-        deleted_count = len(df_filtered[df_filtered['is_deleted'] == True])
-        removed_count = len(df_filtered[df_filtered['is_removed'] == True])
-        st.metric("Deleted/Removed", deleted_count + removed_count)
+        low_hate_count = len(df_filtered[(df_filtered['hate_speech'] >= 0.20) & (df_filtered['hate_speech'] < 0.30)])
+        st.metric("Low Hate (0.20-0.30)", low_hate_count)
     
     st.markdown("---")
     
     # Toxicity distribution charts
     st.subheader("📊 Toxicity Score Distribution")
     
-    toxicity_labels = ['toxic', 'insult', 'identity_attack', 'threat', 'sexual_explicit', 'severe_toxic']
+    toxicity_labels = ['non_hate', 'hate_speech']
     
     # Create subplots for toxicity scores
     fig = make_subplots(
-        rows=2, cols=3,
+        rows=1, cols=2,
         subplot_titles=toxicity_labels,
-        specs=[[{"secondary_y": False}] * 3] * 2
+        specs=[[{"secondary_y": False}] * 2]
     )
     
     for i, label in enumerate(toxicity_labels):
-        row = (i // 3) + 1
-        col = (i % 3) + 1
+        row = 1
+        col = i + 1
         
         # Filter out deleted/removed items for score distribution
         valid_scores = df_filtered[
@@ -218,7 +208,7 @@ def main():
             row=row, col=col
         )
     
-    fig.update_layout(height=600, showlegend=False)
+    fig.update_layout(height=400, showlegend=False)
     st.plotly_chart(fig, use_container_width=True)
     
     # Daily toxicity trends
@@ -268,14 +258,11 @@ def main():
     st.markdown("---")
     st.subheader("🚨 Flagged Content Review")
     
-    flagged_df = df_filtered[df_filtered['is_flagged'] == True].copy()
-    
-    if len(flagged_df) > 0:
-        st.write(f"Found {len(flagged_df)} flagged items")
+    if len(df_filtered) > 0:
+        st.write(f"Showing {len(df_filtered)} flagged items (hate speech ≥ 0.20)")
         
-        # Sort by highest toxicity scores
-        flagged_df['max_toxicity'] = flagged_df[toxicity_labels].max(axis=1)
-        flagged_df = flagged_df.sort_values('max_toxicity', ascending=False)
+        # Sort by highest hate speech scores
+        flagged_df = df_filtered.sort_values('hate_speech', ascending=False)
         
         # Display flagged items
         for idx, row in flagged_df.iterrows():
