@@ -4,7 +4,7 @@ sys.path.append('src')
 
 import boto3
 import json
-from config import AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, S3_BUCKET_NAME, DYNAMODB_TABLE_NAME
+from src.config import AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, S3_BUCKET_NAME, DYNAMODB_TABLE_NAME
 
 def quick_browse():
     """Quick browse of the database"""

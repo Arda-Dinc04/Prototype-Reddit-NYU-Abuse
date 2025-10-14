@@ -4,6 +4,10 @@ python-dotenv==1.0.1
 boto3==1.35.0
 botocore==1.35.0
 
+# Database
+SQLAlchemy==2.0.23
+psycopg2-binary==2.9.9
+
 # Data analysis
 pandas==2.2.3
 
