@@ -13,7 +13,6 @@ RAW_TERMS = {
     "asian":        r"\basian(s)?\b",
     "white":        r"\bwhite(s)?\b",
     "racism":       r"\bracism\b|\bracist(s)?\b",
-    "financial aid":r"\bfinancial[\s\-]?aid\b",
 }
 
 # Category-based terms configuration
@@ -53,7 +52,6 @@ CATEGORY_TERMS = {
         "dumbass":r"\bdumbass(es)?\b",
     },
     "academics_finance": {
-        "financial aid": r"\bfinancial[\s\-]?aid\b",
         "scholarship":   r"\bscholarship(s)?\b",
         "tuition":       r"\btuition\b",
         "fafsa":         r"\bfafsa\b",
@@ -154,10 +152,11 @@ def iter_comments(conn):
 
 def main():
     parser = argparse.ArgumentParser(description="Compute topic mentions from Reddit data")
+    parser.add_argument("--db", type=str, default="nyu_reddit_full.sqlite", help="Database path (default: nyu_reddit_full.sqlite)")
     parser.add_argument("--rebuild", action="store_true", help="Truncate tables before inserting")
     args = parser.parse_args()
     
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(args.db)
     ensure_table(conn)
     
     if args.rebuild:

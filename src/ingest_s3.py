@@ -178,59 +178,123 @@ class RedditS3Ingester:
             print(f"❌ Error processing {item_type} {item.id}: {e}")
             return False
     
-    def ingest_posts_and_comments(self, days):
-        """Main ingestion function"""
-        print(f"🚀 Starting Reddit ingestion for r/{SUBREDDIT} (last {days} days)")
+    
+    def get_existing_ids(self):
+        """Get all existing item IDs from DynamoDB to avoid duplicates"""
+        print("🔍 Checking for existing items in DynamoDB...")
+        existing_ids = set()
+        try:
+            # Scan table to get all IDs (may be slow for large tables, but ensures no duplicates)
+            response = self.table.scan(
+                ProjectionExpression='id',
+                Select='SPECIFIC_ATTRIBUTES'
+            )
+            for item in response.get('Items', []):
+                existing_ids.add(item['id'])
+            
+            # Handle pagination
+            while 'LastEvaluatedKey' in response:
+                response = self.table.scan(
+                    ProjectionExpression='id',
+                    Select='SPECIFIC_ATTRIBUTES',
+                    ExclusiveStartKey=response['LastEvaluatedKey']
+                )
+                for item in response.get('Items', []):
+                    existing_ids.add(item['id'])
+            
+            print(f"📊 Found {len(existing_ids)} existing items in DynamoDB")
+            return existing_ids
+        except Exception as e:
+            print(f"⚠️  Error scanning DynamoDB: {e}")
+            print("   Continuing without duplicate check...")
+            return set()
+    
+    def ingest_posts_and_comments(self, days=None, max_posts=None):
+        """Main ingestion function - pulls all available recent posts"""
+        print(f"🚀 Starting Reddit ingestion for r/{SUBREDDIT}")
         
         # Ensure AWS resources exist
         self.ensure_bucket_exists()
         self.ensure_dynamodb_table_exists()
         
-        # Calculate time range
-        since = datetime.now(timezone.utc) - timedelta(days=days)
-        since_epoch = since.timestamp()
+        # Get existing IDs to avoid duplicates
+        existing_ids = self.get_existing_ids()
         
-        print(f"📅 Collecting data since: {since.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        # Use max limit if not specified (Reddit API max is 1000)
+        max_posts = max_posts if max_posts else 1000
+        print(f"📊 Using maximum Reddit API limit: {max_posts} posts")
+        
+        # Calculate time range if days specified
+        since_epoch = None
+        if days:
+            since = datetime.now(timezone.utc) - timedelta(days=days)
+            since_epoch = since.timestamp()
+            print(f"📅 Collecting data since: {since.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        else:
+            print("📅 Collecting all available recent posts (max limit)")
         
         # Get subreddit
         sr = self.reddit.subreddit(SUBREDDIT)
         
         posts_processed = 0
+        posts_skipped = 0
         comments_processed = 0
+        comments_skipped = 0
         
         # Process posts
-        print("📝 Processing posts...")
-        for post in sr.new(limit=2000):  # Cap for prototype
-            if post.created_utc < since_epoch:
+        print("\n📝 Processing posts...")
+        for post in sr.new(limit=max_posts):
+            # Skip if older than specified days
+            if since_epoch and post.created_utc < since_epoch:
+                break  # Posts are sorted by new, so we can stop here
+            
+            # Skip if already exists
+            if post.id in existing_ids:
+                posts_skipped += 1
                 continue
                 
             if self.process_reddit_item(post, 'post'):
                 posts_processed += 1
+                existing_ids.add(post.id)  # Track to avoid re-processing
+                if posts_processed % 50 == 0:
+                    print(f"   Processed {posts_processed} new posts...")
             
             # Process comments for this post
             try:
                 post.comments.replace_more(limit=0)
                 for comment in post.comments.list():
-                    if comment.created_utc >= since_epoch:
-                        if self.process_reddit_item(comment, 'comment'):
-                            comments_processed += 1
+                    # Skip if older than specified days
+                    if since_epoch and comment.created_utc < since_epoch:
+                        continue
+                    
+                    # Skip if already exists
+                    if comment.id in existing_ids:
+                        comments_skipped += 1
+                        continue
+                    
+                    if self.process_reddit_item(comment, 'comment'):
+                        comments_processed += 1
+                        existing_ids.add(comment.id)  # Track to avoid re-processing
             except Exception as e:
                 print(f"⚠️ Error processing comments for post {post.id}: {e}")
         
         print(f"\n📊 Ingestion Complete!")
-        print(f"   Posts processed: {posts_processed}")
-        print(f"   Comments processed: {comments_processed}")
-        print(f"   Total items: {posts_processed + comments_processed}")
-        print(f"   Data stored in: s3://{S3_BUCKET_NAME}/raw-data/")
-        print(f"   Metadata in: DynamoDB table '{DYNAMODB_TABLE_NAME}'")
+        print(f"   ✅ New posts added: {posts_processed}")
+        print(f"   ⏭️  Posts skipped (duplicates): {posts_skipped}")
+        print(f"   ✅ New comments added: {comments_processed}")
+        print(f"   ⏭️  Comments skipped (duplicates): {comments_skipped}")
+        print(f"   📦 Total new items: {posts_processed + comments_processed}")
+        print(f"   📁 Data stored in: s3://{S3_BUCKET_NAME}/raw-data/")
+        print(f"   📊 Metadata in: DynamoDB table '{DYNAMODB_TABLE_NAME}'")
 
 def main():
-    parser = argparse.ArgumentParser(description='Ingest Reddit data to S3')
-    parser.add_argument('--days', type=int, default=BACKFILL_DAYS, help='Number of days to backfill')
+    parser = argparse.ArgumentParser(description='Ingest Reddit data to S3 and DynamoDB')
+    parser.add_argument('--days', type=int, default=None, help='Number of days to backfill (default: all available, max 1000 posts)')
+    parser.add_argument('--max-posts', type=int, default=1000, help='Maximum number of posts to retrieve (default: 1000, Reddit API max)')
     args = parser.parse_args()
     
     ingester = RedditS3Ingester()
-    ingester.ingest_posts_and_comments(args.days)
+    ingester.ingest_posts_and_comments(args.days, args.max_posts)
 
 if __name__ == "__main__":
     main()

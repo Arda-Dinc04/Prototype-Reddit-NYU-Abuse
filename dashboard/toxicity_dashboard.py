@@ -37,10 +37,11 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-@st.cache_data
+@st.cache_data(ttl=60)  # Cache for 60 seconds, then refresh
 def load_data():
     """Load toxicity classification data from SQLite"""
-    conn = sqlite3.connect("nyu_reddit_local.sqlite")
+    # Use the full dataset database
+    conn = sqlite3.connect("nyu_reddit_full.sqlite")
     
     # Get toxicity classifications with original data
     query = """
@@ -119,6 +120,14 @@ def extract_original_content(row):
 def main():
     st.title("🚨 NYU Reddit Flagged Content Dashboard")
     st.markdown("**Showing only items flagged for hate speech (score ≥ 0.20)**")
+    
+    # Add refresh button
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        if st.button("🔄 Refresh Data"):
+            st.cache_data.clear()
+            st.rerun()
+    
     st.markdown("---")
     
     # Load data
@@ -237,13 +246,7 @@ def main():
         'is_removed': 'sum'
     }).reset_index()
     
-    daily_stats['flagged_rate'] = (daily_stats['is_flagged'] / daily_stats['id']) * 100
-    
-    fig_trends = make_subplots(
-        rows=2, cols=1,
-        subplot_titles=['Daily Flagged Items', 'Daily Flagged Rate (%)'],
-        vertical_spacing=0.1
-    )
+    fig_trends = go.Figure()
     
     fig_trends.add_trace(
         go.Scatter(
@@ -252,22 +255,15 @@ def main():
             mode='lines+markers',
             name='Flagged Items',
             line=dict(color='red')
-        ),
-        row=1, col=1
+        )
     )
     
-    fig_trends.add_trace(
-        go.Scatter(
-            x=daily_stats['created_date'],
-            y=daily_stats['flagged_rate'],
-            mode='lines+markers',
-            name='Flagged Rate (%)',
-            line=dict(color='orange')
-        ),
-        row=2, col=1
+    fig_trends.update_layout(
+        height=400,
+        title='Daily Flagged Items',
+        xaxis_title='Date',
+        yaxis_title='Number of Flagged Items'
     )
-    
-    fig_trends.update_layout(height=500)
     st.plotly_chart(fig_trends, use_container_width=True)
     
     # Topic Mentions section
@@ -275,13 +271,13 @@ def main():
     st.subheader("🧵 Topic Mentions Over Time")
 
     # Load mentions
-    mentions_df = load_topic_mentions("nyu_reddit_local.sqlite")
+    mentions_df = load_topic_mentions("nyu_reddit_full.sqlite")
     if mentions_df.empty:
         st.info("Run `python src/compute_topic_mentions.py` to populate topic mentions.")
     else:
         # Default terms
         all_terms = sorted(mentions_df["term"].unique().tolist())
-        default_terms = [t for t in ["black","asian","white","racism","financial aid"] if t in all_terms]
+        default_terms = [t for t in ["black","asian","white","racism"] if t in all_terms]
 
         # Date range filter for topics
         min_day = mentions_df["day"].min().date()
@@ -294,13 +290,12 @@ def main():
             mdf = mentions_df.copy()
 
         terms = st.multiselect("Terms to plot", options=all_terms, default=default_terms)
-        metric = st.radio("Metric", ["Count", "Per 1k items"], horizontal=True)
-        ycol = "count" if metric == "Count" else "rate_per_1k"
+        ycol = "count"
 
         if terms:
             plot_df = mdf[mdf["term"].isin(terms)]
             fig = px.line(plot_df, x="day", y=ycol, color="term", markers=True,
-                          title=f"Topic mentions ({ycol})")
+                          title="Topic mentions (Count)")
             fig.update_layout(hovermode="x unified", height=420)
             st.plotly_chart(fig, use_container_width=True)
 
@@ -312,7 +307,7 @@ def main():
     st.markdown("---")
     st.subheader("🧵 Topic Categories Over Time")
     
-    DB_PATH = "nyu_reddit_local.sqlite"
+    DB_PATH = "nyu_reddit_full.sqlite"
     mcat = load_topic_mentions_cat(DB_PATH)
     
     if mcat.empty:
@@ -332,8 +327,7 @@ def main():
         tabs = st.tabs([pretty[c] for c in categories])
         
         # Global controls
-        metric = st.radio("Metric", ["Count", "Per 1k items"], horizontal=True, key="topic_metric")
-        ycol = "count" if metric=="Count" else "rate_per_1k"
+        ycol = "count"
         
         # Date filter
         min_day, max_day = mcat["day"].min().date(), mcat["day"].max().date()
@@ -350,7 +344,7 @@ def main():
                 if selected:
                     plot_df = dfc[dfc["term"].isin(selected)]
                     fig = px.line(plot_df, x="day", y=ycol, color="term", markers=True)
-                    fig.update_layout(hovermode="x unified", height=360, title=f"{pretty[cat]} ({ycol})")
+                    fig.update_layout(hovermode="x unified", height=360, title=f"{pretty[cat]} (Count)")
                     st.plotly_chart(fig, use_container_width=True)
                 else:
                     st.info("Select at least one term.")

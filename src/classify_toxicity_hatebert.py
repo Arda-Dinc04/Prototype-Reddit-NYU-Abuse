@@ -456,6 +456,10 @@ def main(db_path: str = "nyu_reddit_local.sqlite"):
     process_all_items(db_path)
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description='Run HateBERT toxicity classification on Reddit data')
+    parser.add_argument('--db', type=str, default="nyu_reddit_local.sqlite", help='Path to SQLite database (default: nyu_reddit_local.sqlite)')
+    args = parser.parse_args()
+    main(args.db)
 
 
