@@ -40,7 +40,7 @@ st.set_page_config(
 @st.cache_data
 def load_data():
     """Load toxicity classification data from SQLite"""
-    conn = sqlite3.connect("/Users/ardadinc/Desktop/Prototype-Reddit-NYU-Abuse/nyu-reddit-abuse-proto/nyu_reddit_local.sqlite")
+    conn = sqlite3.connect("nyu_reddit_local.sqlite")
     
     # Get toxicity classifications with original data
     query = """
@@ -275,7 +275,7 @@ def main():
     st.subheader("🧵 Topic Mentions Over Time")
 
     # Load mentions
-    mentions_df = load_topic_mentions("/Users/ardadinc/Desktop/Prototype-Reddit-NYU-Abuse/nyu-reddit-abuse-proto/nyu_reddit_local.sqlite")
+    mentions_df = load_topic_mentions("nyu_reddit_local.sqlite")
     if mentions_df.empty:
         st.info("Run `python src/compute_topic_mentions.py` to populate topic mentions.")
     else:
@@ -312,7 +312,7 @@ def main():
     st.markdown("---")
     st.subheader("🧵 Topic Categories Over Time")
     
-    DB_PATH = "/Users/ardadinc/Desktop/Prototype-Reddit-NYU-Abuse/nyu-reddit-abuse-proto/nyu_reddit_local.sqlite"
+    DB_PATH = "nyu_reddit_local.sqlite"
     mcat = load_topic_mentions_cat(DB_PATH)
     
     if mcat.empty:
