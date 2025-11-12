@@ -1,3 +1,6 @@
+# Minimal requirements for Streamlit Dashboard only
+# The dashboard only reads from SQLite, so it doesn't need torch/transformers
+
 # Core dependencies
 praw==7.7.1
 python-dotenv==1.0.1
@@ -11,5 +14,3 @@ pandas==2.2.3
 streamlit==1.38.0
 plotly==5.24.1
 
-# Note: torch and transformers are only needed for local classification scripts
-# Install separately if needed: pip install torch transformers
