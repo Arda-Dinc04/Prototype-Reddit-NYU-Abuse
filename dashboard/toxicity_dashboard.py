@@ -12,22 +12,59 @@ from plotly.subplots import make_subplots
 import sqlite3
 from datetime import datetime, timedelta
 import json
+import os
+
+def get_db_path():
+    """Get the first available database path"""
+    db_paths = ["nyu_reddit_full.sqlite", "nyu_reddit_local.sqlite"]
+    for path in db_paths:
+        if os.path.exists(path):
+            return path
+    return None
 
 @st.cache_data
 def load_topic_mentions(db_path: str):
-    conn = sqlite3.connect(db_path)
-    dfm = pd.read_sql_query("SELECT * FROM topic_mentions_daily ORDER BY day", conn)
-    conn.close()
-    dfm["day"] = pd.to_datetime(dfm["day"])
-    return dfm
+    if not os.path.exists(db_path):
+        return pd.DataFrame()
+    try:
+        conn = sqlite3.connect(db_path)
+        # Check if table exists
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name='topic_mentions_daily'
+        """)
+        if not cursor.fetchone():
+            conn.close()
+            return pd.DataFrame()
+        dfm = pd.read_sql_query("SELECT * FROM topic_mentions_daily ORDER BY day", conn)
+        conn.close()
+        dfm["day"] = pd.to_datetime(dfm["day"])
+        return dfm
+    except Exception:
+        return pd.DataFrame()
 
 @st.cache_data
 def load_topic_mentions_cat(db_path: str):
-    conn = sqlite3.connect(db_path)
-    df = pd.read_sql_query("SELECT * FROM topic_mentions_cat_daily ORDER BY day", conn)
-    conn.close()
-    df["day"] = pd.to_datetime(df["day"])
-    return df
+    if not os.path.exists(db_path):
+        return pd.DataFrame()
+    try:
+        conn = sqlite3.connect(db_path)
+        # Check if table exists
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name='topic_mentions_cat_daily'
+        """)
+        if not cursor.fetchone():
+            conn.close()
+            return pd.DataFrame()
+        df = pd.read_sql_query("SELECT * FROM topic_mentions_cat_daily ORDER BY day", conn)
+        conn.close()
+        df["day"] = pd.to_datetime(df["day"])
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 # Page configuration
 st.set_page_config(
@@ -40,45 +77,67 @@ st.set_page_config(
 @st.cache_data(ttl=60)  # Cache for 60 seconds, then refresh
 def load_data():
     """Load toxicity classification data from SQLite"""
-    # Use the full dataset database
-    conn = sqlite3.connect("nyu_reddit_full.sqlite")
+    db_path = get_db_path()
     
-    # Get toxicity classifications with original data
-    query = """
-    SELECT 
-        tc.*,
-        CASE 
-            WHEN tc.item_type = 'post' THEN p.raw_json
-            WHEN tc.item_type = 'comment' THEN c.raw_json
-        END as raw_json,
-        CASE 
-            WHEN tc.item_type = 'post' THEN p.created_utc
-            WHEN tc.item_type = 'comment' THEN c.created_utc
-        END as created_utc,
-        CASE 
-            WHEN tc.item_type = 'post' THEN p.score
-            WHEN tc.item_type = 'comment' THEN c.score
-        END as score
-    FROM toxicity_classifications tc
-    LEFT JOIN posts p ON tc.id = p.id AND tc.item_type = 'post'
-    LEFT JOIN comments c ON tc.id = c.id AND tc.item_type = 'comment'
-    WHERE tc.hate_speech >= 0.20
-    ORDER BY tc.hate_speech DESC, tc.classification_timestamp DESC
-    """
+    if db_path is None:
+        # Return empty DataFrame if no database found
+        return pd.DataFrame()
     
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-    
-    # Convert timestamps
-    df['created_date'] = pd.to_datetime(df['created_utc'], unit='s')
-    df['classification_date'] = pd.to_datetime(df['classification_timestamp'])
-    
-    # Add flagged column
-    thresholds = get_toxicity_thresholds()
-    df['is_flagged'] = df.apply(lambda row: is_flagged(row, thresholds), axis=1)
-    df['flag_reasons'] = df.apply(lambda row: get_flag_reasons(row, thresholds), axis=1)
-    
-    return df
+    try:
+        conn = sqlite3.connect(db_path)
+        
+        # Check if toxicity_classifications table exists
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name='toxicity_classifications'
+        """)
+        if not cursor.fetchone():
+            conn.close()
+            return pd.DataFrame()
+        
+        # Get toxicity classifications with original data
+        query = """
+        SELECT 
+            tc.*,
+            CASE 
+                WHEN tc.item_type = 'post' THEN p.raw_json
+                WHEN tc.item_type = 'comment' THEN c.raw_json
+            END as raw_json,
+            CASE 
+                WHEN tc.item_type = 'post' THEN p.created_utc
+                WHEN tc.item_type = 'comment' THEN c.created_utc
+            END as created_utc,
+            CASE 
+                WHEN tc.item_type = 'post' THEN p.score
+                WHEN tc.item_type = 'comment' THEN c.score
+            END as score
+        FROM toxicity_classifications tc
+        LEFT JOIN posts p ON tc.id = p.id AND tc.item_type = 'post'
+        LEFT JOIN comments c ON tc.id = c.id AND tc.item_type = 'comment'
+        WHERE tc.hate_speech >= 0.20
+        ORDER BY tc.hate_speech DESC, tc.classification_timestamp DESC
+        """
+        
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+        
+        if df.empty:
+            return df
+        
+        # Convert timestamps
+        df['created_date'] = pd.to_datetime(df['created_utc'], unit='s')
+        df['classification_date'] = pd.to_datetime(df['classification_timestamp'])
+        
+        # Add flagged column
+        thresholds = get_toxicity_thresholds()
+        df['is_flagged'] = df.apply(lambda row: is_flagged(row, thresholds), axis=1)
+        df['flag_reasons'] = df.apply(lambda row: get_flag_reasons(row, thresholds), axis=1)
+        
+        return df
+    except Exception as e:
+        # Return empty DataFrame on any error
+        return pd.DataFrame()
 
 def get_toxicity_thresholds():
     """Get toxicity thresholds for flagging - optimized for dehatebert"""
@@ -135,7 +194,19 @@ def main():
         df = load_data()
     
     if df.empty:
-        st.error("No toxicity classification data found. Run the classification script first.")
+        st.warning("⚠️ **Database Not Found**")
+        st.info("""
+        The dashboard requires a SQLite database file to display data. 
+        
+        **To set up the database:**
+        1. Run data collection: `python src/pull_reddit_to_db.py --limit 100 --db nyu_reddit_full.sqlite`
+        2. Run classification: `python src/classify_toxicity_hatebert.py --db nyu_reddit_full.sqlite`
+        3. Run topic analysis: `python src/compute_topic_mentions.py --db nyu_reddit_full.sqlite`
+        
+        **For Streamlit Cloud:**
+        - Upload your database file to the repository, or
+        - Use Streamlit secrets to configure database access
+        """)
         return
     
     thresholds = get_toxicity_thresholds()
@@ -271,7 +342,11 @@ def main():
     st.subheader("🧵 Topic Mentions Over Time")
 
     # Load mentions
-    mentions_df = load_topic_mentions("nyu_reddit_full.sqlite")
+    db_path = get_db_path()
+    if db_path:
+        mentions_df = load_topic_mentions(db_path)
+    else:
+        mentions_df = pd.DataFrame()
     if mentions_df.empty:
         st.info("Run `python src/compute_topic_mentions.py` to populate topic mentions.")
     else:
@@ -307,8 +382,11 @@ def main():
     st.markdown("---")
     st.subheader("🧵 Topic Categories Over Time")
     
-    DB_PATH = "nyu_reddit_full.sqlite"
-    mcat = load_topic_mentions_cat(DB_PATH)
+    db_path = get_db_path()
+    if db_path:
+        mcat = load_topic_mentions_cat(db_path)
+    else:
+        mcat = pd.DataFrame()
     
     if mcat.empty:
         st.info("Run `python src/compute_topic_mentions.py` to populate category mentions.")
